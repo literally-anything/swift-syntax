@@ -486,6 +486,37 @@ private func expandBodyMacro(
   return "\(raw: indentedSource)"
 }
 
+private func expandAttributeMacro(
+  definition: AttributeMacro.Type,
+  attributeNode: AttributeSyntax,
+  providingAttributesFor declaration: some WithAttributesSyntax,
+  in context: some MacroExpansionContext,
+  indentationWidth: Trivia
+) -> AttributeListSyntax? {
+  guard
+    let expanded = expandAttachedMacro(
+      definition: definition,
+      macroRole: .attribute,
+      attributeNode: attributeNode.detach(
+        in: context,
+        foldingWith: .standardOperators
+      ),
+      node: declaration.detach(in: context),
+      parentDeclNode: nil,
+      extendedType: nil,
+      conformanceList: nil,
+      in: context,
+      indentationWidth: indentationWidth
+    )
+  else {
+    return nil
+  }
+
+  // The added attributes should be on their own line, so prepend them with a newline.
+  let indentedSource = "\n" + expanded.indented(by: declaration.indentationOfFirstLine)
+  return "\(raw: indentedSource)"
+}
+
 // MARK: - MacroSystem
 
 /// Describes the kinds of errors that can occur within a macro system.
@@ -664,6 +695,9 @@ private class MacroApplication<Context: MacroExpansionContext>: SyntaxRewriter {
   /// the root macro node to the last macro node currently expanding.
   var expandingFreestandingMacros: [any Macro.Type] = []
 
+  /// Stores the types of the attribute macros that are currently expanding.
+  var expandingAttributeMacros: [any AttributeMacro.Type] = []
+
   init(
     macroSystem: MacroSystem,
     contextGenerator: @escaping (Syntax) -> Context,
@@ -702,6 +736,9 @@ private class MacroApplication<Context: MacroExpansionContext>: SyntaxRewriter {
       let attributedNode = node.asProtocol(WithAttributesSyntax.self),
       !attributedNode.attributes.isEmpty
     {
+      // Apply atribute macros.
+      declSyntax = visitAttributeMacros(attributedNode).cast(DeclSyntax.self)
+
       // Apply body and preamble macros.
       if let nodeWithBody = node.asProtocol(WithOptionalCodeBlockSyntax.self),
         let declNodeWithBody = nodeWithBody as? any DeclSyntaxProtocol & WithOptionalCodeBlockSyntax
@@ -834,6 +871,31 @@ private class MacroApplication<Context: MacroExpansionContext>: SyntaxRewriter {
     }
 
     return node.with(\.statements, body.statements)
+  }
+
+  func visitAttributeMacros(_ node: some WithAttributesSyntax) -> some WithAttributesSyntax {
+    // ToDo: All the expand function gets is the raw node which is passed to every macro expansion and the 
+    //       current attribute list. the expand function recurses by itself. It needs recursion limits.
+    //       Remove and reimplement the expandMacros call because it should look directly at my attribute list
+    //       instead of taking in the entire node. Allow closure expansions. The expand function should only
+    //       require that the node is WithAttributeSyntax at most. We can cast the value to this and back to set it in visitAny
+
+    // Apply attribute macros.
+    var newAttributes = AttributeListSyntax(
+      expandAttributesFromAttributeMacros(of: node, attributes: node.attributes)
+    )
+
+    if !newAttributes.isEmpty {
+      // Transfer the trailing trivia from the old attributes to the new attributes.
+      // This way, we essentially insert the new attributes right after the last attribute in source
+      // but before its trailing trivia, keeping the trivia that separates the attribute block
+      // from the variable itself.
+      newAttributes.trailingTrivia = newAttributes.trailingTrivia + node.attributes.trailingTrivia
+      newAttributes.insert(contentsOf: node.attributes.with(\.trailingTrivia, []), at: newAttributes.startIndex)
+
+      return node.with(\.attributes, newAttributes)
+    }
+    return node
   }
 
   override func visit(_ node: CodeBlockItemListSyntax) -> CodeBlockItemListSyntax {
@@ -1286,6 +1348,47 @@ extension MacroApplication {
       }
     }
     return (newAccessorsBlock, expandsGetSet)
+  }
+
+  /// Return the attributes on `decl` that are synthesized from attribute
+  /// macros.
+  ///
+  /// - Note: This only returns synthesized attributes from attribute macros,
+  ///         not the attributes that are attached to `decl` in the source code.
+  private func expandAttributesFromAttributeMacros(
+    of decl: some WithAttributesSyntax,
+    attributes: AttributeListSyntax
+  ) -> [AttributeListSyntax.Element] {
+    return expandMacros(
+      attachedTo: decl.with(\.attributes, attributes),
+      ofType: AttributeMacro.Type.self
+    ) { attributeNode, definition, _ in
+      // If this macro is already being expanded, throw a recursion error.
+      guard !expandingAttributeMacros.contains(where: { $0 == definition }) else {
+        throw MacroExpansionError.recursiveExpansion(definition)
+      }
+
+      let newAttributes = expandAttributeMacro(
+        definition: definition,
+        attributeNode: attributeNode,
+        providingAttributesFor: decl,
+        in: contextGenerator(Syntax(decl)),
+        indentationWidth: indentationWidth
+      )
+
+      // If there were attributes added, try to expand any new macros.
+      if let newAttributes, !newAttributes.isEmpty {
+        // Mark that this macro has already been called in this expansion.
+        expandingAttributeMacros.append(definition)
+        defer {
+          expandingAttributeMacros.removeLast()
+        }
+
+        return newAttributes + expandAttributesFromAttributeMacros(of: decl, attributes: newAttributes)
+      }
+
+      return newAttributes
+    }
   }
 }
 
