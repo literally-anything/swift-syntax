@@ -256,6 +256,7 @@ private extension MacroRole {
     case .extension: self = .extension
     case .preamble: self = .preamble
     case .body: self = .body
+    case .attribute: self = .attribute
     }
   }
 }

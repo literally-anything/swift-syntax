@@ -32,6 +32,7 @@ public enum MacroRole: Sendable {
   case `extension`
   @_spi(ExperimentalLanguageFeatures) case preamble
   case body
+  @_spi(ExperimentalLanguageFeatures) case attribute
 }
 
 extension MacroRole {
@@ -48,6 +49,7 @@ extension MacroRole {
     case .extension: return "ExtensionMacro"
     case .preamble: return "PreambleMacro"
     case .body: return "BodyMacro"
+    case .attribute: return "AttributeMacro"
     }
   }
 }
@@ -153,7 +155,7 @@ public func expandFreestandingMacro(
 
     case (.accessor, _), (.memberAttribute, _), (.member, _), (.peer, _), (.conformance, _), (.extension, _),
       (.expression, _), (.declaration, _),
-      (.codeItem, _), (.preamble, _), (.body, _):
+      (.codeItem, _), (.preamble, _), (.body, _), (.attribute, _):
       throw MacroExpansionError.unmatchedMacroRole(definition, macroRole)
     }
     return expandedSyntax.formattedExpansion(definition.formatMode, indentationWidth: indentationWidth)
@@ -400,6 +402,19 @@ public func expandAttachedMacroWithoutCollapsing<Context: MacroExpansionContext>
       }
 
       return body.map {
+        $0.formattedExpansion(definition.formatMode, indentationWidth: indentationWidth)
+      }
+    
+    case (let attachedMacro as AttributeMacro.Type, .attribute):
+      let declarationNode = node.cast(DeclSyntax.self)
+      let attributes = try attachedMacro.expansion(
+        of: attributeNode,
+        providingAttributesFor: declarationNode,
+        in: context
+      )
+
+      // Form a buffer containing an attribute list to return to the caller.
+      return attributes.map {
         $0.formattedExpansion(definition.formatMode, indentationWidth: indentationWidth)
       }
 
